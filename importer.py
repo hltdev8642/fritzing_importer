@@ -256,7 +256,7 @@ def _get_transform_from_module(module_elem):
             rot = rot_from_transform
     return (lx, ly, lz), rot
 
-def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, perform_boolean_cut=False):
+def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, bevel_depth=0.0, perform_boolean_cut=False):
     if not zipfile.is_zipfile(filepath):
         raise RuntimeError("Not a zip archive")
     # Use the fzp_parser helpers
@@ -275,7 +275,7 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
             models_map[key] = new_objs
             if convert_to_mesh:
                 _convert_objects_to_mesh(new_objs, join=join)
-                _apply_extrusion_to_objects(new_objs, extrusion_depth)
+                _apply_extrusion_to_objects(new_objs, extrusion_depth, bevel_depth)
     svgs_map = {}
     for src, dest in extracted_svgs.items():
         new_objs = _get_new_objects_after_call(_import_svg_from_file, dest)
@@ -284,7 +284,7 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
             svgs_map[key] = new_objs
             if convert_to_mesh:
                 _convert_objects_to_mesh(new_objs, join=join)
-                _apply_extrusion_to_objects(new_objs, extrusion_depth)
+                _apply_extrusion_to_objects(new_objs, extrusion_depth, bevel_depth)
     # Get metadata for fzp files
     for fzp in fzp_files:
         with zipfile.ZipFile(filepath, 'r') as z:
@@ -343,7 +343,7 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                     if perform_boolean_cut:
                         _apply_boolean_cut(placed_all)
 
-def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, perform_boolean_cut=False):
+def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, bevel_depth=0.0, perform_boolean_cut=False):
     # plain xml fzp file - typically references images / models by relative path
     if not os.path.exists(filepath):
         raise RuntimeError("File not found")
@@ -378,7 +378,7 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
                     svgs_map[key] = new_objs
                 if convert_to_mesh and new_objs:
                     _convert_objects_to_mesh(new_objs, join=join)
-                    _apply_extrusion_to_objects(new_objs, extrusion_depth)
+                    _apply_extrusion_to_objects(new_objs, extrusion_depth, bevel_depth)
             # apply placement for this module
             if use_placement:
                 transform = _get_transform_from_module(elem)
@@ -466,6 +466,13 @@ class ImportFritzingPart(bpy.types.Operator, ImportHelper):
         min=0.0,
         max=10.0,
     )
+    bevel_depth: FloatProperty(
+        name="Bevel Depth",
+        description="Bevel width to add to extruded meshes (0.0 = no bevel)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+    )
     perform_boolean_cut: BoolProperty(
         name="Perform Boolean Cut",
         description="Apply boolean difference operations to cut overlapping parts for visibility",
@@ -477,14 +484,14 @@ class ImportFritzingPart(bpy.types.Operator, ImportHelper):
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext == '.fzpz':
-                import_fzp_from_zip(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, perform_boolean_cut=self.perform_boolean_cut)
+                import_fzp_from_zip(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, bevel_depth=self.bevel_depth, perform_boolean_cut=self.perform_boolean_cut)
             elif ext == '.fzp':
-                import_fzp_file(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, perform_boolean_cut=self.perform_boolean_cut)
+                import_fzp_file(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, bevel_depth=self.bevel_depth, perform_boolean_cut=self.perform_boolean_cut)
             elif ext == '.svg':
                 new_objs = _get_new_objects_after_call(_import_svg_from_file, path)
                 if self.convert_to_mesh and new_objs:
                     _convert_objects_to_mesh(new_objs, join=self.join_meshes)
-                    _apply_extrusion_to_objects(new_objs, self.extrusion_depth)
+                    _apply_extrusion_to_objects(new_objs, self.extrusion_depth, self.bevel_depth)
             else:
                 self.report({'WARNING'}, f"Unsupported extension: {ext}")
                 return {'CANCELLED'}
@@ -512,6 +519,7 @@ class FritzingImporterPanel(bpy.types.Panel):
         layout.prop(op, 'pin_size')
         layout.prop(op, 'pin_as_mesh')
         layout.prop(op, 'extrusion_depth')
+        layout.prop(op, 'bevel_depth')
         layout.prop(op, 'perform_boolean_cut')
 
 def menu_func_import(self, context):
