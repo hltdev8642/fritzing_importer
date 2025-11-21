@@ -29,3 +29,18 @@ def extract_files_by_extensions(filepath, extensions):
                     dst.write(src.read())
                 extracted[name] = dest
     return extracted
+
+def parse_position_string(pos_str):
+    # Parse a comma separated string 'x,y[,z]' to floats
+    if pos_str is None:
+        return None
+    try:
+        parts = [p.strip() for p in pos_str.split(',')]
+        nums = [float(p) for p in parts if p != '']
+        if len(nums) == 2:
+            return (nums[0], nums[1], 0.0)
+        if len(nums) >= 3:
+            return (nums[0], nums[1], nums[2])
+        return None
+    except Exception:
+        return None

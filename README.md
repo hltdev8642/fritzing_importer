@@ -22,6 +22,20 @@ Usage
 
 - From the 3D Viewport UI, open the `N` sidebar and find the `Fritzing` tab. Click the `Import Fritzing Part` button or go to `File > Import > Fritzing Part (.fzpz/.fzp/.svg)` and select a `.fzpz`, `.fzp` or `.svg` file.
 
+Additional Options
+
+- `Convert to Mesh`: When enabled, imported curves and SVGs will be converted into mesh objects automatically.
+- `Join Meshes`: When enabled, imported meshes will be joined into a single object after import and conversion.
+
+Placement Options
+
+- `Use Placement`: When enabled, placement metadata from `.fzp` files will be applied to imported objects.
+- `Placement Scale`: Conversion factor between Fritzing placement units and Blender units (default `0.001`, which treats Fritzing units as millimeters and converts to meters).
+
+Duplication behavior
+
+- If a `.fzp` module references the same file multiple times (same model used more than once), the importer will duplicate the base object for each module and apply placement transforms to each duplicate.
+
 - Notes
 
 - Only simple automatic import is implemented. The add-on tries to import `.obj/.stl` models and `.svg` files contained in `.fzpz` packages and .fzp referencing files.

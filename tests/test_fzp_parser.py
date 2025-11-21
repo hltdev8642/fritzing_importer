@@ -17,3 +17,9 @@ def test_list_zip_contents(tmp_path):
     items = fzp_parser.list_zip_contents(str(zfile))
     assert 'part.fzp' in items
     assert 'model.obj' in items
+
+def test_parse_position_string():
+    from ..lib import fzp_parser
+    assert fzp_parser.parse_position_string('12.0, 34.5') == (12.0, 34.5, 0.0)
+    assert fzp_parser.parse_position_string('1,2,3') == (1.0, 2.0, 3.0)
+    assert fzp_parser.parse_position_string(None) is None
