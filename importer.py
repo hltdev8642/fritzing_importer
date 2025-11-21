@@ -4,6 +4,7 @@ from bpy_extras.io_utils import ImportHelper
 import os
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
 from .lib import fzp_parser
 
 def _import_obj_from_file(filepath):
@@ -95,24 +96,105 @@ def _apply_transform_to_object(obj, loc=None, rot_z=None, scale=None):
     except Exception as e:
         print(f"Applying transform failed on {obj.name}: {e}")
 
-def _duplicate_object(obj, collection=None):
+def _apply_boolean_cut(placed_objects):
+    # Sort by Z location ascending (lower Z first, assuming "below")
+    placed_objects.sort(key=lambda o: o.location.z)
+    mesh_objects = [o for o in placed_objects if o.type == 'MESH']
+    if len(mesh_objects) < 2:
+        return
     try:
-        new_obj = obj.copy()
-        if obj.data:
-            new_obj.data = obj.data.copy()
-        # Clear animation data
-        try:
-            new_obj.animation_data_clear()
-        except Exception:
-            pass
-        # Link to collection
+        for i, obj in enumerate(mesh_objects[1:], 1):  # start from second
+            cutters = mesh_objects[:i]
+            if not cutters:
+                continue
+            # Duplicate cutters
+            bpy.ops.object.select_all(action='DESELECT')
+            for c in cutters:
+                c.select_set(True)
+            bpy.ops.object.duplicate()
+            duplicated_cutters = [o for o in bpy.context.selected_objects if o != obj]
+            if len(duplicated_cutters) > 1:
+                bpy.context.view_layer.objects.active = duplicated_cutters[0]
+                bpy.ops.object.join()
+            cutter = bpy.context.active_object
+            # Apply boolean difference to obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+            mod = obj.modifiers.new(name="Boolean", type='BOOLEAN')
+            mod.operation = 'DIFFERENCE'
+            mod.object = cutter
+            bpy.ops.object.modifier_apply(modifier="Boolean")
+            # Delete cutter
+            bpy.ops.object.select_all(action='DESELECT')
+            cutter.select_set(True)
+            bpy.ops.object.delete()
+    except Exception as e:
+        print(f"Boolean cut failed: {e}")
+
+def _create_pin_marker(location=(0,0,0), name='pin', size=0.002, as_mesh=False, collection=None):
+    # Create an empty or small sphere mesh to represent a pin
+    try:
         if collection is None:
             collection = bpy.context.collection
-        collection.objects.link(new_obj)
-        return new_obj
+        if not as_mesh:
+            e = bpy.data.objects.new(name, None)
+            e.empty_display_type = 'SPHERE'
+            e.empty_display_size = size
+            e.location = location
+            collection.objects.link(e)
+            return e
+        # create a UV sphere mesh
+        mesh = bpy.data.meshes.new(f"{name}_mesh")
+        bm = None
+        try:
+            import bmesh
+            bm = bmesh.new()
+            bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, diameter=size)
+            bm.to_mesh(mesh)
+        finally:
+            if bm:
+                bm.free()
+        obj = bpy.data.objects.new(name, mesh)
+        obj.location = location
+        collection.objects.link(obj)
+        return obj
     except Exception as e:
-        print(f"Duplicating object failed: {e}")
+        print(f"Failed to create pin marker: {e}")
         return None
+
+def _create_pins_for_module(module_elem, placed_objects, context, create_pins=False, pin_size=0.002, pin_as_mesh=False, placement_scale=0.001):
+    if not create_pins:
+        return
+    # module_elem may be an Element; use tostring to parse pins via the fzp_parser testable function
+    try:
+        xml_text = ET.tostring(module_elem, encoding='unicode')
+    except Exception:
+        return
+    modules = fzp_parser.extract_modules_and_pins_from_fzp_string(xml_text)
+    if not modules:
+        return
+    pins = modules[0].get('pins', [])
+    for pin in pins:
+            px, py, pz = pin['position']
+            local_loc = (px * placement_scale, py * placement_scale, pz * placement_scale)
+            for o in placed_objects:
+                # create marker with default location, then parent and set local location
+                marker = _create_pin_marker(location=(0,0,0), name=f"{o.name}_pin_{pin.get('id','')}", size=pin_size, as_mesh=pin_as_mesh, collection=context.collection)
+                if marker:
+                    try:
+                        marker.parent = o
+                        marker.location = local_loc
+                        rot_value = pin.get('rotation') or pin.get('angle')
+                        if rot_value is not None:
+                            try:
+                                import math
+                                marker.rotation_mode = 'XYZ'
+                                marker.rotation_euler[2] = math.radians(rot_value)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
 def _parse_fzp_xml(text):
     return fzp_parser.parse_fzp_xml_string(text)
@@ -125,6 +207,7 @@ def _get_transform_from_module(module_elem):
     rotation = module_elem.get('rotation') or module_elem.get('angle')
     # check nested <position> or attribute 'position'
     pos_attr = module_elem.get('position')
+    transform_attr = module_elem.get('transform')
     if not (x and y) and pos_attr:
         # try to parse like "12.3,45.6"
         try:
@@ -161,9 +244,19 @@ def _get_transform_from_module(module_elem):
         rot = None
     if lx is None or ly is None:
         return None
+    # If module has a transform attribute, apply translation/rotation from it
+    if transform_attr:
+        t = fzp_parser.parse_transform_string(transform_attr)
+        trans = t.get('translate')
+        if trans and (lx is not None and ly is not None):
+            lx += trans[0]
+            ly += trans[1]
+        rot_from_transform = t.get('rotate')
+        if rot_from_transform is not None:
+            rot = rot_from_transform
     return (lx, ly, lz), rot
 
-def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001):
+def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, perform_boolean_cut=False):
     if not zipfile.is_zipfile(filepath):
         raise RuntimeError("Not a zip archive")
     # Use the fzp_parser helpers
@@ -182,6 +275,7 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
             models_map[key] = new_objs
             if convert_to_mesh:
                 _convert_objects_to_mesh(new_objs, join=join)
+                _apply_extrusion_to_objects(new_objs, extrusion_depth)
     svgs_map = {}
     for src, dest in extracted_svgs.items():
         new_objs = _get_new_objects_after_call(_import_svg_from_file, dest)
@@ -190,6 +284,7 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
             svgs_map[key] = new_objs
             if convert_to_mesh:
                 _convert_objects_to_mesh(new_objs, join=join)
+                _apply_extrusion_to_objects(new_objs, extrusion_depth)
     # Get metadata for fzp files
     for fzp in fzp_files:
         with zipfile.ZipFile(filepath, 'r') as z:
@@ -202,6 +297,7 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                 context.scene['fritzing_part'] = title
                 # apply placement metadata for each module if requested
                 if use_placement:
+                    placed_all = []
                     for module in root.findall('.//module'):
                         fileattr = module.get('file') or module.get('url')
                         if not fileattr:
@@ -224,6 +320,8 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                             if dup:
                                 placed_objs.append(dup)
                                 _apply_transform_to_object(dup, loc=(mx, my, mz), rot_z=rot)
+                                # optionally create pins for this module
+                                _create_pins_for_module(module, [dup], context, create_pins=create_pins, pin_size=pin_size, pin_as_mesh=pin_as_mesh, placement_scale=placement_scale)
                         # If join requested, optionally join placed_objs
                         if join and placed_objs:
                             bpy.ops.object.select_all(action='DESELECT')
@@ -234,8 +332,18 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                                 bpy.ops.object.join()
                             except Exception as e:
                                 print(f"Join failed for placed objects: {e}")
+                            # after joining, placed_objs[0] remains as the joined object; we may want to create pins relative to that
+                            if create_pins:
+                                # create pins relative to joined object using the module element
+                                                _create_pins_for_module(module, [bpy.context.view_layer.objects.active], context, create_pins=create_pins, pin_size=pin_size, pin_as_mesh=pin_as_mesh, placement_scale=placement_scale)
+                            placed_all.append(bpy.context.view_layer.objects.active)
+                        else:
+                            placed_all.extend(placed_objs)
+                    # After all placements, apply boolean cut if requested
+                    if perform_boolean_cut:
+                        _apply_boolean_cut(placed_all)
 
-def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001):
+def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, perform_boolean_cut=False):
     # plain xml fzp file - typically references images / models by relative path
     if not os.path.exists(filepath):
         raise RuntimeError("File not found")
@@ -248,6 +356,7 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
     basedir = os.path.dirname(filepath)
     models_map = {}
     svgs_map = {}
+    placed_all = []
     for elem in root.findall('.//module'):
         fileattr = elem.get('file') or elem.get('url')
         if not fileattr:
@@ -269,6 +378,7 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
                     svgs_map[key] = new_objs
                 if convert_to_mesh and new_objs:
                     _convert_objects_to_mesh(new_objs, join=join)
+                    _apply_extrusion_to_objects(new_objs, extrusion_depth)
             # apply placement for this module
             if use_placement:
                 transform = _get_transform_from_module(elem)
@@ -285,6 +395,8 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
                             if dup:
                                 placed_objs.append(dup)
                                 _apply_transform_to_object(dup, loc=(mx, my, mz), rot_z=rot)
+                                # create pins for this module duplicate
+                                _create_pins_for_module(elem, [dup], context, create_pins=create_pins, pin_size=pin_size, pin_as_mesh=pin_as_mesh, placement_scale=placement_scale)
                         if join and placed_objs:
                             bpy.ops.object.select_all(action='DESELECT')
                             for o in placed_objs:
@@ -294,6 +406,14 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
                                 bpy.ops.object.join()
                             except Exception as e:
                                 print(f"Join failed for placed objects: {e}")
+                            if create_pins:
+                                _create_pins_for_module(elem, [bpy.context.view_layer.objects.active], context, create_pins=create_pins, pin_size=pin_size, pin_as_mesh=pin_as_mesh, placement_scale=placement_scale)
+                            placed_all.append(bpy.context.view_layer.objects.active)
+                        else:
+                            placed_all.extend(placed_objs)
+    # After all placements, apply boolean cut if requested
+    if perform_boolean_cut:
+        _apply_boolean_cut(placed_all)
 
 class ImportFritzingPart(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.fritzing_part"
@@ -323,19 +443,48 @@ class ImportFritzingPart(bpy.types.Operator, ImportHelper):
         default=0.001,
         min=0.0,
     )
+    create_pins: BoolProperty(
+        name="Create Pins",
+        description="Create pin markers (empties or small meshes) for module pins",
+        default=True,
+    )
+    pin_size: FloatProperty(
+        name="Pin Size",
+        description="Size of pin marker in Blender units when instantiating pins",
+        default=0.002,
+        min=0.0,
+    )
+    pin_as_mesh: BoolProperty(
+        name="Pin as Mesh",
+        description="Create pins as small sphere meshes instead of empties",
+        default=False,
+    )
+    extrusion_depth: FloatProperty(
+        name="Extrusion Depth",
+        description="Thickness to add to imported meshes (0.0 = no extrusion)",
+        default=0.0,
+        min=0.0,
+        max=10.0,
+    )
+    perform_boolean_cut: BoolProperty(
+        name="Perform Boolean Cut",
+        description="Apply boolean difference operations to cut overlapping parts for visibility",
+        default=False,
+    )
 
     def execute(self, context):
         path = self.filepath
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext == '.fzpz':
-                import_fzp_from_zip(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale)
+                import_fzp_from_zip(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, perform_boolean_cut=self.perform_boolean_cut)
             elif ext == '.fzp':
-                import_fzp_file(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale)
+                import_fzp_file(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, perform_boolean_cut=self.perform_boolean_cut)
             elif ext == '.svg':
                 new_objs = _get_new_objects_after_call(_import_svg_from_file, path)
                 if self.convert_to_mesh and new_objs:
                     _convert_objects_to_mesh(new_objs, join=self.join_meshes)
+                    _apply_extrusion_to_objects(new_objs, self.extrusion_depth)
             else:
                 self.report({'WARNING'}, f"Unsupported extension: {ext}")
                 return {'CANCELLED'}
@@ -359,6 +508,11 @@ class FritzingImporterPanel(bpy.types.Panel):
         layout.prop(op, 'join_meshes')
         layout.prop(op, 'use_placement')
         layout.prop(op, 'placement_scale')
+        layout.prop(op, 'create_pins')
+        layout.prop(op, 'pin_size')
+        layout.prop(op, 'pin_as_mesh')
+        layout.prop(op, 'extrusion_depth')
+        layout.prop(op, 'perform_boolean_cut')
 
 def menu_func_import(self, context):
     self.layout.operator(ImportFritzingPart.bl_idname, text="Fritzing Part (.fzpz/.fzp/.svg)")

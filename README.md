@@ -26,7 +26,7 @@ Additional Options
 
 - `Convert to Mesh`: When enabled, imported curves and SVGs will be converted into mesh objects automatically.
 - `Join Meshes`: When enabled, imported meshes will be joined into a single object after import and conversion.
-
+- `Extrusion Depth`: Thickness to add to imported meshes (0.0 = no extrusion). Adds a Solidify modifier to give 2D SVGs depth in the Z-axis.- `Perform Boolean Cut`: When enabled, applies boolean difference operations to cut overlapping placed parts, ensuring all parts are visible by removing intersections.
 Placement Options
 
 - `Use Placement`: When enabled, placement metadata from `.fzp` files will be applied to imported objects.
@@ -35,6 +35,11 @@ Placement Options
 Duplication behavior
 
 - If a `.fzp` module references the same file multiple times (same model used more than once), the importer will duplicate the base object for each module and apply placement transforms to each duplicate.
+
+Assembly and Pins
+
+- `Create Pins`: When enabled, the importer will create pin markers for module pins defined in the `.fzp` metadata and attach them to the placed module duplicates.
+- `Pin Size` and `Pin as Mesh`: Control the pin marker type and visual size. Pin markers default to empties (SPHERE display) and can be created as small sphere meshes.
 
 - Notes
 
