@@ -7,6 +7,16 @@ import zipfile
 import xml.etree.ElementTree as ET
 from .lib import fzp_parser
 
+_ADDON_ID = __package__ if __package__ else 'fritzing_importer'
+
+def _debug(msg):
+    try:
+        prefs = bpy.context.preferences.addons[_ADDON_ID].preferences
+        if getattr(prefs, 'enable_debug', False):
+            print(f"[FritzingImport DEBUG] {msg}")
+    except Exception:
+        pass
+
 def _import_obj_from_file(filepath):
     try:
         return bpy.ops.import_scene.obj(filepath=filepath)
@@ -96,6 +106,29 @@ def _apply_transform_to_object(obj, loc=None, rot_z=None, scale=None):
     except Exception as e:
         print(f"Applying transform failed on {obj.name}: {e}")
 
+def _apply_extrusion_to_objects(objects, depth, bevel_depth=0.0):
+    # Add solidify (and optional bevel) modifiers to mesh objects
+    if depth is None or depth <= 0:
+        return
+    for obj in objects:
+        if obj is None:
+            continue
+        if obj.type != 'MESH':
+            continue
+        try:
+            _debug(f"Adding Solidify modifier to {obj.name} (thickness={depth})")
+            mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+            mod.thickness = depth
+            mod.offset = -1.00
+            if bevel_depth and bevel_depth > 0:
+                _debug(f"Adding Bevel modifier to {obj.name} (width={bevel_depth})")
+                bevel_mod = obj.modifiers.new(name="Bevel", type='BEVEL')
+                bevel_mod.width = bevel_depth
+                bevel_mod.segments = 4
+                bevel_mod.profile = 0.5
+        except Exception as e:
+            print(f"Failed to add extrusion modifiers to {obj.name}: {e}")
+
 def _apply_boolean_cut(placed_objects):
     # Sort by Z location ascending (lower Z first, assuming "below")
     placed_objects.sort(key=lambda o: o.location.z)
@@ -104,6 +137,7 @@ def _apply_boolean_cut(placed_objects):
         return
     try:
         for i, obj in enumerate(mesh_objects[1:], 1):  # start from second
+            _debug(f"Boolean cut iteration {i}: target={obj.name}, cutters={[c.name for c in mesh_objects[:i]]}")
             cutters = mesh_objects[:i]
             if not cutters:
                 continue
@@ -129,6 +163,7 @@ def _apply_boolean_cut(placed_objects):
             bpy.ops.object.select_all(action='DESELECT')
             cutter.select_set(True)
             bpy.ops.object.delete()
+            _debug(f"Boolean cut applied to {obj.name}; cutter deleted")
     except Exception as e:
         print(f"Boolean cut failed: {e}")
 
@@ -162,6 +197,18 @@ def _create_pin_marker(location=(0,0,0), name='pin', size=0.002, as_mesh=False, 
     except Exception as e:
         print(f"Failed to create pin marker: {e}")
         return None
+
+class FritzingImporterPreferences(bpy.types.AddonPreferences):
+    bl_idname = _ADDON_ID
+    enable_debug: BoolProperty(
+        name="Enable Debug Output",
+        description="When enabled, the addon prints debug messages to the terminal",
+        default=False,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, 'enable_debug')
 
 def _create_pins_for_module(module_elem, placed_objects, context, create_pins=False, pin_size=0.002, pin_as_mesh=False, placement_scale=0.001):
     if not create_pins:
@@ -256,9 +303,10 @@ def _get_transform_from_module(module_elem):
             rot = rot_from_transform
     return (lx, ly, lz), rot
 
-def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, bevel_depth=0.0, perform_boolean_cut=False):
+def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, bevel_depth=0.0, perform_boolean_cut=False, z_step=0.01, z_step_in_blender_units=False, min_z_step=1e-5):
     if not zipfile.is_zipfile(filepath):
         raise RuntimeError("Not a zip archive")
+    _debug(f"import_fzp_from_zip: filepath={filepath} convert_to_mesh={convert_to_mesh} join={join} placement_scale={placement_scale} extrusion_depth={extrusion_depth} bevel={bevel_depth} z_step={z_step} z_step_blender={z_step_in_blender_units} min_z_step={min_z_step}")
     # Use the fzp_parser helpers
     extracted_models = fzp_parser.extract_files_by_extensions(filepath, ['.obj', '.stl'])
     extracted_svgs = fzp_parser.extract_files_by_extensions(filepath, ['.svg'])
@@ -298,11 +346,12 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                 # apply placement metadata for each module if requested
                 if use_placement:
                     placed_all = []
-                    for module in root.findall('.//module'):
+                    for idx, module in enumerate(root.findall('.//module')):
                         fileattr = module.get('file') or module.get('url')
                         if not fileattr:
                             continue
                         name = os.path.basename(fileattr).lower()
+                        _debug(f"Module[{idx}] name={name} fileattr={fileattr}")
                         transform = _get_transform_from_module(module)
                         if transform is None:
                             continue
@@ -310,16 +359,26 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                         mx *= placement_scale
                         my *= placement_scale
                         mz *= placement_scale
+                        # calculate per-step value (either blender units or fritzing units scaled by placement_scale)
+                        step_val = z_step if z_step_in_blender_units else (z_step * placement_scale)
+                        if min_z_step and step_val < min_z_step:
+                            step_val = min_z_step
+                        mz += idx * step_val
                         # find base objects matching model or svg name
                         base_list = models_map.get(name) or svgs_map.get(name)
                         if not base_list:
                             continue
                         placed_objs = []
-                        for base in base_list:
+                        for base_idx, base in enumerate(base_list):
                             dup = _duplicate_object(base, collection=context.collection)
                             if dup:
                                 placed_objs.append(dup)
-                                _apply_transform_to_object(dup, loc=(mx, my, mz), rot_z=rot)
+                                step_val = z_step if z_step_in_blender_units else (z_step * placement_scale)
+                                if min_z_step and step_val < min_z_step:
+                                    step_val = min_z_step
+                                final_mz = mz + (base_idx * step_val)
+                                _debug(f"Placing base {base_idx} of module {name} at z={final_mz}")
+                                _apply_transform_to_object(dup, loc=(mx, my, final_mz), rot_z=rot)
                                 # optionally create pins for this module
                                 _create_pins_for_module(module, [dup], context, create_pins=create_pins, pin_size=pin_size, pin_as_mesh=pin_as_mesh, placement_scale=placement_scale)
                         # If join requested, optionally join placed_objs
@@ -343,10 +402,11 @@ def import_fzp_from_zip(filepath, context, convert_to_mesh=False, join=False, us
                     if perform_boolean_cut:
                         _apply_boolean_cut(placed_all)
 
-def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, bevel_depth=0.0, perform_boolean_cut=False):
+def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_placement=True, placement_scale=0.001, create_pins=False, pin_size=0.002, pin_as_mesh=False, extrusion_depth=0.0, bevel_depth=0.0, perform_boolean_cut=False, z_step=0.01, z_step_in_blender_units=False, min_z_step=1e-5):
     # plain xml fzp file - typically references images / models by relative path
     if not os.path.exists(filepath):
         raise RuntimeError("File not found")
+    _debug(f"import_fzp_file: filepath={filepath} convert_to_mesh={convert_to_mesh} join={join} placement_scale={placement_scale} extrusion_depth={extrusion_depth} bevel={bevel_depth} z_step={z_step} z_step_blender={z_step_in_blender_units} min_z_step={min_z_step}")
     with open(filepath, 'r', encoding='utf-8') as f:
         data = f.read()
     root = _parse_fzp_xml(data)
@@ -357,7 +417,7 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
     models_map = {}
     svgs_map = {}
     placed_all = []
-    for elem in root.findall('.//module'):
+    for idx, elem in enumerate(root.findall('.//module')):
         fileattr = elem.get('file') or elem.get('url')
         if not fileattr:
             continue
@@ -387,14 +447,20 @@ def import_fzp_file(filepath, context, convert_to_mesh=False, join=False, use_pl
                     mx *= placement_scale
                     my *= placement_scale
                     mz *= placement_scale
+                    # compute step_val (scaled by placement_scale unless z_step_in_blender_units)
+                    step_val = z_step if z_step_in_blender_units else (z_step * placement_scale)
+                    if min_z_step and step_val < min_z_step:
+                        step_val = min_z_step
+                    mz += idx * step_val
                     base_list = models_map.get(os.path.basename(fileattr).lower()) or svgs_map.get(os.path.basename(fileattr).lower())
                     if base_list:
                         placed_objs = []
-                        for base in base_list:
+                        for base_idx, base in enumerate(base_list):
                             dup = _duplicate_object(base, collection=context.collection)
                             if dup:
                                 placed_objs.append(dup)
-                                _apply_transform_to_object(dup, loc=(mx, my, mz), rot_z=rot)
+                                final_mz = mz + (base_idx * step_val)
+                                _apply_transform_to_object(dup, loc=(mx, my, final_mz), rot_z=rot)
                                 # create pins for this module duplicate
                                 _create_pins_for_module(elem, [dup], context, create_pins=create_pins, pin_size=pin_size, pin_as_mesh=pin_as_mesh, placement_scale=placement_scale)
                         if join and placed_objs:
@@ -478,20 +544,49 @@ class ImportFritzingPart(bpy.types.Operator, ImportHelper):
         description="Apply boolean difference operations to cut overlapping parts for visibility",
         default=False,
     )
+    z_step: FloatProperty(
+        name="Z Step",
+        description="Incremental Z offset applied per module in import order (in Fritzing units; scaled by Placement Scale)",
+        default=0.01,
+        min=0.0,
+    )
+    z_step_in_blender_units: BoolProperty(
+        name="Z Step in Blender Units",
+        description="If set, Z Step is treated as Blender units directly instead of scaling by Placement Scale",
+        default=False,
+    )
+    min_z_step: FloatProperty(
+        name="Minimum Z Step",
+        description="Minimum per-step Z offset in Blender units; ensures tiny offsets are bumped to a visible minimum",
+        default=1e-5,
+        min=0.0,
+    )
+    # Backwards-compat alias for the operator-level convenience; not used for the addon-pref toggle
 
     def execute(self, context):
         path = self.filepath
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext == '.fzpz':
-                import_fzp_from_zip(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, bevel_depth=self.bevel_depth, perform_boolean_cut=self.perform_boolean_cut)
+                import_fzp_from_zip(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, bevel_depth=self.bevel_depth, perform_boolean_cut=self.perform_boolean_cut, z_step=self.z_step, z_step_in_blender_units=self.z_step_in_blender_units, min_z_step=self.min_z_step)
             elif ext == '.fzp':
-                import_fzp_file(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, bevel_depth=self.bevel_depth, perform_boolean_cut=self.perform_boolean_cut)
+                import_fzp_file(path, context, convert_to_mesh=self.convert_to_mesh, join=self.join_meshes, use_placement=self.use_placement, placement_scale=self.placement_scale, create_pins=self.create_pins, pin_size=self.pin_size, pin_as_mesh=self.pin_as_mesh, extrusion_depth=self.extrusion_depth, bevel_depth=self.bevel_depth, perform_boolean_cut=self.perform_boolean_cut, z_step=self.z_step, z_step_in_blender_units=self.z_step_in_blender_units, min_z_step=self.min_z_step)
             elif ext == '.svg':
                 new_objs = _get_new_objects_after_call(_import_svg_from_file, path)
                 if self.convert_to_mesh and new_objs:
                     _convert_objects_to_mesh(new_objs, join=self.join_meshes)
                     _apply_extrusion_to_objects(new_objs, self.extrusion_depth, self.bevel_depth)
+                    # calculate step value based on units selection and min threshold
+                    step_val = self.z_step if self.z_step_in_blender_units else (self.z_step * self.placement_scale)
+                    if self.min_z_step and step_val < self.min_z_step:
+                        step_val = self.min_z_step
+                    # apply z-step ordering for standalone SVG imports per path/object
+                    for idx, o in enumerate(new_objs):
+                        try:
+                            _debug(f"SVG import: placing object {o.name} at z offset {idx * step_val}")
+                            o.location.z += idx * step_val
+                        except Exception:
+                            pass
             else:
                 self.report({'WARNING'}, f"Unsupported extension: {ext}")
                 return {'CANCELLED'}
@@ -521,6 +616,9 @@ class FritzingImporterPanel(bpy.types.Panel):
         layout.prop(op, 'extrusion_depth')
         layout.prop(op, 'bevel_depth')
         layout.prop(op, 'perform_boolean_cut')
+        layout.prop(op, 'z_step')
+        layout.prop(op, 'z_step_in_blender_units')
+        layout.prop(op, 'min_z_step')
 
 def menu_func_import(self, context):
     self.layout.operator(ImportFritzingPart.bl_idname, text="Fritzing Part (.fzpz/.fzp/.svg)")

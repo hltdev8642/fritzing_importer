@@ -15,6 +15,7 @@ from . import importer
 classes = [
     importer.ImportFritzingPart,
     importer.FritzingImporterPanel,
+    importer.FritzingImporterPreferences,
 ]
 
 def register():

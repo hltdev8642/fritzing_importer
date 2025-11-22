@@ -1,0 +1,39 @@
+Fritzing Importer Add-on — Enhancement Prompt
+
+Goal:
+- Create and improve a Blender 5.0+ add-on to import Fritzing parts (.fzp, .fzz) as usable 3D assets.
+
+User workflow:
+- Present an actionable list of potential operations for the add-on.
+- Allow the user to select one or more operations (by number or keyword).
+- Implement the selected operations and report back with the implemented changes.
+
+Potential operations (select by number or name):
+1. Import operator & file selector (.fzp, .fzz) — add import menu entry and file browser dialog with options (scale, axis, LOD, view priority).
+2. Parser & SVG extraction — parse .fzp/.fzz, extract metadata and SVGs for PCB/breadboard/schematic views.
+3. Connector mapping — map electrical pins/connectors to empties or named mesh sockets, include pin naming and indices.
+4. Low-poly model generator — create parametric primitives for common parts (resistors, capacitors, ICs, headers, connectors) with correct pin spacing.
+5. Unit conversion & scaling — convert Fritzing mm to Blender meters and expose scale factor in UI (default: 1 mm = 0.001 m).
+6. Collection & naming conventions — group imported assets into collections, set clear object and material names.
+7. Materials & PBR defaults — provide default material styles with simple PBR values and option to bake textures from SVGs.
+8. Import options & preferences — add add-on preferences (default scale, material style) and import operator properties.
+9. Snap/align/grid helpers — add utilities for aligning pins and connectors, optionally snap parts to a grid by pin spacing.
+10. Export/helpers — add assembly helpers, library linking, or export metadata for external tools.
+11. Error handling & validation — robust error messages, logging, and file validation.
+12. Tests & example parts — add unit tests and sample Fritzing parts to validate import pipeline.
+13. Packaging & cross-platform checks — ensure registration, clean enable/disable, and packaging compatibility (Windows/macOS/Linux).
+14. Code quality & docs — PEP8, modular structure (operators, IO/parsers, model generators), docstrings and brief usage README.
+15. Web research tasks — verify Blender 5.0+ API patterns for file importers, file selector, mesh creation, and Fritzing format specs.
+
+Implementation details:
+- When the user chooses operations, apply the selected changes in iterations, report progress and show diffs where applicable.
+- Use web research tasks (#web #websearch) to confirm API calls, data formats, and SVG handling.
+- Stick to Blender 5.0 Python API best practices, keep code portable, and add minimal working examples first.
+
+Interaction examples:
+- "Select: 1,2,4,5" — Implement file selector, parser, model generator, and scaling.
+- "Select: parser, materials, docs" — Implement parser, default materials, and documentation improvements.
+
+Notes:
+- Prioritize smaller, testable changes first (operators, parser, and basic model generator), then expand.
+- Report back with a changelog for each implemented item and minimal sample usage steps.
