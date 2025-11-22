@@ -119,7 +119,7 @@ def _apply_extrusion_to_objects(objects, depth, bevel_depth=0.0):
             _debug(f"Adding Solidify modifier to {obj.name} (thickness={depth})")
             mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
             mod.thickness = depth
-            mod.offset = -1.00
+            mod.offset = 0.00
             if bevel_depth and bevel_depth > 0:
                 _debug(f"Adding Bevel modifier to {obj.name} (width={bevel_depth})")
                 bevel_mod = obj.modifiers.new(name="Bevel", type='BEVEL')
